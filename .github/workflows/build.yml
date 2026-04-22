@@ -43,21 +43,12 @@ jobs:
           mkdir -p src
           
           # Copy tất cả file .ino vào src/
-          echo "Copying .ino files..."
-          cp *.ino src/ 2>/dev/null || echo "No .ino files found in root"
-          
-          # Copy tất cả file .h vào src/
-          echo "Copying .h files..."
-          cp *.h src/ 2>/dev/null || echo "No .h files found in root"
-          
-          # Copy tất cả file .cpp vào src/
-          echo "Copying .cpp files..."
-          cp *.cpp src/ 2>/dev/null || echo "No .cpp files found in root"
+          cp *.ino src/ 2>/dev/null || true
+          cp *.h src/ 2>/dev/null || true
+          cp *.cpp src/ 2>/dev/null || true
           
           # Hiển thị cấu trúc
-          echo "=== src directory contents ==="
           ls -la src/
-          echo "=============================="
       
       - name: Cache PlatformIO
         uses: actions/cache@v4
@@ -82,14 +73,6 @@ jobs:
           compression-level: 9
           retention-days: 30
           if-no-files-found: warn
-      
-      - name: Upload renamed firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: lottery-miner-${{ matrix.env }}.bin
-          path: .pio/build/${{ matrix.env }}/firmware.bin
-          retention-days: 30
-          if-no-files-found: warn
 
   summary:
     name: Build Summary
@@ -100,26 +83,28 @@ jobs:
     steps:
       - name: Create summary
         run: |
-          echo "# 🎲 ESP32 Lottery Miner Build Report" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## ✅ Build Status" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Environment | Status |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| esp32dev | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| esp32-s3-devkitc-1 | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| esp32-c3-devkitm-1 | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| esp32-light | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "| esp32-4mb | ✅ |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "📥 **Download firmware from Artifacts section below**" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🚀 How to flash" >> $GITHUB_STEP_SUMMARY
-          echo "```bash" >> $GITHUB_STEP_SUMMARY
-          echo "# Download firmware.bin from artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "# Then flash using esptool:" >> $GITHUB_STEP_SUMMARY
-          echo "esptool.py --chip esp32 --port /dev/ttyUSB0 write_flash 0x10000 firmware.bin" >> $GITHUB_STEP_SUMMARY
-          echo "```" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "# 🎲 ESP32 Lottery Miner Build Report"
+            echo ""
+            echo "## ✅ Build Status"
+            echo ""
+            echo "| Environment | Status |"
+            echo "|-------------|--------|"
+            echo "| esp32dev | ✅ |"
+            echo "| esp32-s3-devkitc-1 | ✅ |"
+            echo "| esp32-c3-devkitm-1 | ✅ |"
+            echo "| esp32-light | ✅ |"
+            echo "| esp32-4mb | ✅ |"
+            echo ""
+            echo "📥 **Download firmware from Artifacts section below**"
+            echo ""
+            echo "### 🚀 How to flash"
+            echo '```bash'
+            echo "# Download firmware.bin from artifacts"
+            echo "# Then flash using esptool:"
+            echo "esptool.py --chip esp32 --port /dev/ttyUSB0 write_flash 0x10000 firmware.bin"
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
 
   release:
     name: Create Release
@@ -139,20 +124,12 @@ jobs:
       - name: Prepare release files
         run: |
           mkdir -p release
-          echo "# ESP32 Lottery Miner v${{ github.ref_name }}" > release/README.md
-          echo "" >> release/README.md
-          echo "## 📦 Firmware Files" >> release/README.md
-          echo "" >> release/README.md
-          
           find artifacts -name "*.bin" -exec cp {} release/ \;
-          
           cd release
           for f in *.bin; do
             sha256sum "$f" > "$f.sha256"
-            echo "- \`$f\`" >> README.md
           done
           cd ..
-          
           ls -la release/
       
       - name: Create Release
