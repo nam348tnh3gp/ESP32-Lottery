@@ -29,13 +29,8 @@ jobs:
           cp *.h src/ 2>/dev/null || true
           ls -la src/
       
-      - name: Clean before build
-        run: pio run --target clean
-      
-      - name: Install all dependencies first
-        run: |
-          pio lib install
-          pio lib list
+      - name: Install dependencies
+        run: pio lib install
       
       - name: Build ${{ matrix.env }}
         run: pio run -e ${{ matrix.env }}
@@ -49,35 +44,3 @@ jobs:
           compression-level: 9
           retention-days: 30
           if-no-files-found: warn
-
-  build-all:
-    name: Build All Environments (Sequential)
-    runs-on: ubuntu-latest
-    needs: build
-    if: always()
-    
-    steps:
-      - name: Create summary
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-# 🎲 ESP32 Lottery Miner Build Report
-
-## ✅ Build Status
-
-| Environment | Status |
-|-------------|--------|
-| esp32dev | ✅ |
-| esp32-s3 | ✅ |
-| esp32-c3 | ✅ |
-| esp32-light | ✅ |
-| esp32-4mb | ✅ |
-| esp32-max-perf | ✅ |
-
-📥 **Download firmware from Artifacts section below**
-
-### 🚀 How to flash
-
-```bash
-# Download firmware.bin from artifacts
-# Then flash using esptool:
-esptool.py --chip esp32 --port /dev/ttyUSB0 write_flash 0x10000 firmware.bin
