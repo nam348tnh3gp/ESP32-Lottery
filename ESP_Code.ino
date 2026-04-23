@@ -1,14 +1,14 @@
 /*
- * ESP32/ESP8266 Lottery Miner v1.3 - Auto Core Detection (Fixed)
- * Compiles on ESP8266 (no FreeRTOS), ESP32-S2/C3 (fix Serial), and standard ESP32.
+ * ESP32/ESP8266 Lottery Miner v1.3 - Auto Core Detection (Final Fixed)
+ * Compiles successfully on ESP8266, ESP32, ESP32-S2, ESP32-C3, ESP32-S3
  */
 
 #include <Arduino.h>
 
-// For ESP32-S2 Serial availability in WiFiManager
+// ---------- FIX for ESP32 variants where Serial is not defined ----------
 #if defined(ESP32)
   #include <HardwareSerial.h>
-  #if !defined(Serial) && (defined(ESP32S2) || defined(ESP32C3) || defined(ESP32S3))
+  #if !defined(Serial)
     #define Serial Serial0
   #endif
 #endif
@@ -26,14 +26,15 @@
     #include "esp_task_wdt.h"
     #include <Preferences.h>
     
-    // Detect ESP32 variant
-    #if defined(CONFIG_FREERTOS_UNICORE) || defined(ESP32S2) || defined(ESP32C3) || defined(ESP32S3)
+    // Detect ESP32 variant (extends compatibility for PlatformIO/Arduino)
+    #if defined(CONFIG_FREERTOS_UNICORE) || defined(ESP32S2) || defined(ESP32C3) || defined(ESP32S3) \
+        || defined(ARDUINO_ESP32S2_DEV) || defined(ARDUINO_ESP32C3_DEV) || defined(ARDUINO_ESP32S3_DEV)
         #define PLATFORM_SINGLE_CORE
-        #if defined(ESP32S2)
+        #if defined(ESP32S2) || defined(ARDUINO_ESP32S2_DEV)
             #define PLATFORM_NAME "ESP32-S2"
-        #elif defined(ESP32C3)
+        #elif defined(ESP32C3) || defined(ARDUINO_ESP32C3_DEV)
             #define PLATFORM_NAME "ESP32-C3"
-        #elif defined(ESP32S3)
+        #elif defined(ESP32S3) || defined(ARDUINO_ESP32S3_DEV)
             #define PLATFORM_NAME "ESP32-S3"
         #else
             #define PLATFORM_NAME "ESP32 (Unicore)"
