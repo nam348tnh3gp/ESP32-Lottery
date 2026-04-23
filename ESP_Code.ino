@@ -1,5 +1,5 @@
 /*
- * ESP32 Lottery Miner v1.1 - Full Features + TLS Support
+ * ESP32 Lottery Miner v1.2 - Full Features + TLS Support
  * - Dual-Core Mining
  * - Watchdog Timer
  * - Auto Pool Failover (TCP + TLS)
@@ -14,13 +14,17 @@
 #include <WiFiManager.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
-#include <AsyncElegantOTA.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include "esp_task_wdt.h"
 #include "DSHA2.h"
+
+// Conditional includes - chỉ include khi KHÔNG disable
+#ifndef DISABLE_WEB_DASHBOARD
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <AsyncElegantOTA.h>
+#endif
 
 // ==================== CONFIG ====================
 #define PREF_NAMESPACE "miner"
@@ -52,9 +56,13 @@ String walletName = "ESP32";
 
 // ==================== GLOBALS ====================
 Preferences prefs;
-AsyncWebServer webServer(80);
 WebSocketsClient stratumWS;
 DSHA256 sha;
+
+// Conditional web server declaration
+#ifndef DISABLE_WEB_DASHBOARD
+AsyncWebServer webServer(80);
+#endif
 
 // Mining state
 volatile bool jobReceived = false;
@@ -83,7 +91,8 @@ TaskHandle_t miningTask0 = NULL;
 TaskHandle_t miningTask1 = NULL;
 SemaphoreHandle_t submitMutex;
 
-// ==================== HTML DASHBOARD ====================
+// ==================== HTML DASHBOARD (chỉ khi không disable) ====================
+#ifndef DISABLE_WEB_DASHBOARD
 const char dashboard_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
@@ -311,6 +320,7 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
 </body>
 </html>
 )rawliteral";
+#endif // DISABLE_WEB_DASHBOARD
 
 // ==================== UTILS ====================
 uint8_t hexToByte(char c) {
@@ -322,7 +332,7 @@ uint8_t hexToByte(char c) {
 
 void hexToBytes(const char* hex, uint8_t* bytes, size_t len) {
     for (size_t i = 0; i < len; i++) {
-        bytes[i] = (hexToByte(hex[i*2]) << 4) | hexToByte(hex[i*2 + 1]);
+        bytes[i] = (hexToByte(hex[i*2]) << 4) | hexToByte(hex[i*2+1]);
     }
 }
 
@@ -524,7 +534,7 @@ void stratumEvent(WStype_t type, uint8_t* payload, size_t length) {
                     hexToBytes(prevHashHex, header + 4, 32);
                     reverseBytes(header + 4, 32);
                     
-                    const char* merkleHex = params[3];  // Note: index 3 cho merkle
+                    const char* merkleHex = params[3];
                     hexToBytes(merkleHex, header + 36, 32);
                     reverseBytes(header + 36, 32);
                     
@@ -616,7 +626,8 @@ void stratumConnect() {
     }
 }
 
-// ==================== WEB SERVER ====================
+// ==================== WEB SERVER (chỉ khi không disable) ====================
+#ifndef DISABLE_WEB_DASHBOARD
 void setupWebServer() {
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
         req->send_P(200, "text/html", dashboard_html);
@@ -684,7 +695,6 @@ void setupWebServer() {
                 btcAddress = doc["btcAddr"].as<String>();
                 walletName = doc["wallet"].as<String>();
                 
-                // Validate
                 if (poolHost.isEmpty()) poolHost = "public-pool.io";
                 if (poolPort == 0) poolPort = 3333;
                 
@@ -714,7 +724,6 @@ void setupWebServer() {
         serializeJson(doc, json);
         req->send(200, "application/json", json);
         
-        // Reconnect
         shouldStopMining = true;
         stratumWS.disconnect();
         delay(2000);
@@ -738,6 +747,7 @@ void setupWebServer() {
     AsyncElegantOTA.begin(&webServer);
     webServer.begin();
 }
+#endif // DISABLE_WEB_DASHBOARD
 
 // ==================== SETUP ====================
 void setup() {
@@ -784,7 +794,7 @@ void setup() {
         ESP.restart();
     }
     
-    WiFi.setSleep(false);  // Tắt WiFi power save
+    WiFi.setSleep(false);
     
     currentIP = WiFi.localIP().toString();
     
@@ -800,16 +810,22 @@ void setup() {
         Serial.println("📡 mDNS: http://" + String(MDNS_NAME) + ".local");
     }
     
-    // Web server
+    // Web server (chỉ khi không disable)
+    #ifndef DISABLE_WEB_DASHBOARD
     setupWebServer();
+    #else
+    Serial.println("⚠️ Web Dashboard disabled (Lite mode)");
+    #endif
     
     // Create mining tasks on both cores (10KB stack)
     xTaskCreatePinnedToCore(miningTask, "MiningTask0", 10240, (void*)0, 1, &miningTask0, 0);
     xTaskCreatePinnedToCore(miningTask, "MiningTask1", 10240, (void*)1, 1, &miningTask1, 1);
     
     Serial.println("\n================================================");
+    #ifndef DISABLE_WEB_DASHBOARD
     Serial.println("🔧 Dashboard: http://" + currentIP);
     Serial.println("📦 OTA Update: http://" + currentIP + "/update");
+    #endif
     Serial.println("⚡ Dual-core mining enabled (Stack: 10KB)");
     Serial.println("🔄 Auto pool failover: ENABLED (4 pools)");
     Serial.println("🔒 TLS Support: ENABLED (port 4333)");
@@ -826,13 +842,9 @@ void setup() {
 
 // ==================== LOOP ====================
 void loop() {
-    // Feed watchdog
     esp_task_wdt_reset();
-    
-    // Handle WebSocket
     stratumWS.loop();
     
-    // Handle solution found
     if (solutionFound) {
         stratumSubmit(nonceFound);
         solutionFound = false;
@@ -840,7 +852,6 @@ void loop() {
         shouldStopMining = true;
     }
     
-    // Report hashrate every 2 seconds
     if (millis() - lastReport > 2000) {
         float hr0 = hashesCore0 / 2.0f;
         float hr1 = hashesCore1 / 2.0f;
@@ -854,15 +865,13 @@ void loop() {
         lastReport = millis();
         hashesCore0 = 0;
         hashesCore1 = 0;
-        nonceStart += 0x10000000;  // Next 256M nonces
+        nonceStart += 0x10000000;
         
-        // Reset nonce range if overflow
         if (nonceStart > 0xF0000000) {
             nonceStart = 0;
         }
     }
     
-    // Check for stale job (60 seconds timeout)
     if (jobReceived && (millis() - lastJobTime > 60000)) {
         jobReceived = false;
         miningActive = false;
@@ -873,7 +882,6 @@ void loop() {
         stratumConnect();
     }
     
-    // Auto reconnect if disconnected
     if (!stratumWS.isConnected() && !btcAddress.isEmpty() && WiFi.isConnected()) {
         if (millis() - lastReconnectAttempt > 10000) {
             lastReconnectAttempt = millis();
