@@ -4,7 +4,6 @@
  * - Watchdog Timer
  * - Auto Pool Failover (TCP + TLS)
  * - Manual Pool Switch
- * - OTA Update
  * - WiFi Manager
  * - mDNS
  * - TLS/SSL Support (WSS)
@@ -23,7 +22,6 @@
 #ifndef DISABLE_WEB_DASHBOARD
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
-#include <AsyncElegantOTA.h>
 #endif
 
 // ==================== CONFIG ====================
@@ -218,7 +216,6 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
         <button onclick='switchPool()'>🔄 Switch Pool</button>
         <button onclick='restartMiner()'>🔁 Restart</button>
         <button onclick='resetWiFi()'>📡 Reset WiFi</button>
-        <button onclick='window.location.href="/update"'>📦 OTA Update</button>
     </div>
     
     <div id='configPanel' class='config-panel card'>
@@ -744,7 +741,6 @@ void setupWebServer() {
         ESP.restart();
     });
     
-    AsyncElegantOTA.begin(&webServer);
     webServer.begin();
 }
 #endif // DISABLE_WEB_DASHBOARD
@@ -824,7 +820,6 @@ void setup() {
     Serial.println("\n================================================");
     #ifndef DISABLE_WEB_DASHBOARD
     Serial.println("🔧 Dashboard: http://" + currentIP);
-    Serial.println("📦 OTA Update: http://" + currentIP + "/update");
     #endif
     Serial.println("⚡ Dual-core mining enabled (Stack: 10KB)");
     Serial.println("🔄 Auto pool failover: ENABLED (4 pools)");
