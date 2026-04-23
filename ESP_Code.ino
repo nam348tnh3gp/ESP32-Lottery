@@ -1,13 +1,16 @@
 /*
- * ESP32/ESP8266 Lottery Miner v1.3 - Auto Core Detection
- * Fixes: forward declaration, conditional includes, Serial on S2, MINER_VERSION redefined
+ * ESP32/ESP8266 Lottery Miner v1.3 - Auto Core Detection (Fixed)
+ * Compiles on ESP8266 (no FreeRTOS), ESP32-S2/C3 (fix Serial), and standard ESP32.
  */
 
 #include <Arduino.h>
 
 // For ESP32-S2 Serial availability in WiFiManager
-#if defined(ESP32S2) || defined(ESP32C3)
+#if defined(ESP32)
   #include <HardwareSerial.h>
+  #if !defined(Serial) && (defined(ESP32S2) || defined(ESP32C3) || defined(ESP32S3))
+    #define Serial Serial0
+  #endif
 #endif
 
 // ==================== PLATFORM DETECTION ====================
@@ -16,9 +19,12 @@
     #include <ESP8266mDNS.h>
     #define PLATFORM_NAME "ESP8266"
     #define PLATFORM_SINGLE_CORE
+    #define ESP8266_NO_RTOS    // flag to disable FreeRTOS code
 #elif defined(ESP32)
     #include <WiFi.h>
     #include <ESPmDNS.h>
+    #include "esp_task_wdt.h"
+    #include <Preferences.h>
     
     // Detect ESP32 variant
     #if defined(CONFIG_FREERTOS_UNICORE) || defined(ESP32S2) || defined(ESP32C3) || defined(ESP32S3)
@@ -41,11 +47,6 @@
 #include <WiFiManager.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-
-#ifdef ESP32
-  #include <Preferences.h>
-  #include "esp_task_wdt.h"
-#endif
 
 // Conditional includes for Web Dashboard
 #ifndef DISABLE_WEB_DASHBOARD
@@ -146,16 +147,19 @@ unsigned long lastJobTime = 0;
 unsigned long lastReport = 0;
 unsigned long lastReconnectAttempt = 0;
 
-#if CORE_COUNT == 2
-    TaskHandle_t miningTask0 = NULL;
-    TaskHandle_t miningTask1 = NULL;
-#else
-    TaskHandle_t miningTask0 = NULL;
+// FreeRTOS objects – only for ESP32 (all variants)
+#ifndef ESP8266_NO_RTOS
+  #if CORE_COUNT == 2
+      TaskHandle_t miningTask0 = NULL;
+      TaskHandle_t miningTask1 = NULL;
+  #else
+      TaskHandle_t miningTask0 = NULL;
+  #endif
+  SemaphoreHandle_t submitMutex;
 #endif
-SemaphoreHandle_t submitMutex;
 
 // ==================== FORWARD DECLARATIONS ====================
-void stratumConnect();   // <-- FIX: forward declaration
+void stratumConnect();
 
 // ==================== HTML DASHBOARD ====================
 #ifndef DISABLE_WEB_DASHBOARD
@@ -473,10 +477,10 @@ void stratumSend(const char* json) {
 }
 
 void stratumSubscribe() {
-    StaticJsonDocument<200> doc;
+    JsonDocument doc;
     doc["id"] = 1;
     doc["method"] = "mining.subscribe";
-    JsonArray params = doc.createNestedArray("params");
+    JsonArray params = doc["params"].to<JsonArray>();
     
     String userAgent = walletName + "/" + MINER_VERSION;
     params.add(userAgent);
@@ -489,10 +493,10 @@ void stratumSubscribe() {
 }
 
 void stratumAuthorize() {
-    StaticJsonDocument<200> doc;
+    JsonDocument doc;
     doc["id"] = 2;
     doc["method"] = "mining.authorize";
-    JsonArray params = doc.createNestedArray("params");
+    JsonArray params = doc["params"].to<JsonArray>();
     
     String username = btcAddress + "." + walletName;
     params.add(username);
@@ -506,10 +510,10 @@ void stratumAuthorize() {
 }
 
 void stratumSubmit(uint32_t foundNonce) {
-    StaticJsonDocument<300> doc;
+    JsonDocument doc;
     doc["id"] = 4;
     doc["method"] = "mining.submit";
-    JsonArray params = doc.createNestedArray("params");
+    JsonArray params = doc["params"].to<JsonArray>();
     
     String username = btcAddress + "." + walletName;
     params.add(username);
@@ -541,14 +545,61 @@ void watchdogReset() {
 #endif
 }
 
-// ==================== MINING TASK ====================
+// ==================== MINING LOGIC (FREE-RTOS and NO-RTOS versions) ====================
+#ifdef ESP8266_NO_RTOS
+// ---------- ESP8266 (non-RTOS) ----------
+void miningLoop() {
+    if (!jobReceived || solutionFound || shouldStopMining) return;
+
+    static uint32_t currentNonce = 0;
+    static bool nonceInit = false;
+    if (!nonceInit) {
+        currentNonce = nonceStart;
+        nonceInit = true;
+    }
+
+    uint32_t endNonce = nonceStart + 0x00FFFFFF;
+    if (currentNonce > endNonce) {
+        // finished range, reset
+        currentNonce = nonceStart;
+    }
+
+    uint8_t localHeader[80];
+    memcpy(localHeader, (void*)header, 80);
+    
+    // Process a small batch per call to keep system responsive
+    int batchSize = 1000; // adjust as needed
+    for (int i = 0; i < batchSize && currentNonce <= endNonce && !solutionFound && !shouldStopMining; i++) {
+        uint32_t nonceLE = currentNonce;
+        memcpy(localHeader + 76, &nonceLE, 4);
+        
+        uint8_t hash[32];
+        sha.hashBlockHeader(localHeader, hash);
+        hashesCore0++;
+        
+        if (checkTarget(hash)) {
+            // Simple flag (no mutex needed on single core)
+            if (!solutionFound) {
+                solutionFound = true;
+                nonceFound = currentNonce;
+                Serial.printf("🏆 BLOCK FOUND! Nonce: 0x%08X\n", currentNonce);
+            }
+            break;
+        }
+        currentNonce++;
+    }
+
+    if (currentNonce > endNonce) {
+        currentNonce = nonceStart; // wrap around
+    }
+}
+#else
+// ---------- ESP32 (FreeRTOS) ----------
 void miningTask(void* parameter) {
     int coreId = (int)parameter;
     Serial.printf("⛏️ Mining task started on Core %d\n", coreId);
     
-#ifdef ESP32
     esp_task_wdt_add(NULL);
-#endif
     
     uint8_t localHeader[80];
     unsigned long* hashesCounter;
@@ -582,7 +633,7 @@ void miningTask(void* parameter) {
             }
 #else
             startNonce = nonceStart;
-            endNonce = nonceStart + 0x00FFFFFF;  // Smaller range for single core
+            endNonce = nonceStart + 0x00FFFFFF;
 #endif
             
             for (uint32_t n = startNonce; n <= endNonce && !solutionFound && !shouldStopMining; n++) {
@@ -615,6 +666,7 @@ void miningTask(void* parameter) {
         vTaskDelay(1 / portTICK_PERIOD_MS);
     }
 }
+#endif
 
 // ==================== STRATUM EVENT ====================
 void stratumEvent(WStype_t type, uint8_t* payload, size_t length) {
@@ -636,7 +688,7 @@ void stratumEvent(WStype_t type, uint8_t* payload, size_t length) {
             
         case WStype_TEXT:
             {
-                StaticJsonDocument<1024> doc;
+                JsonDocument doc;
                 DeserializationError err = deserializeJson(doc, payload, length);
                 if (err) {
                     Serial.printf("⚠️ JSON parse error: %s\n", err.c_str());
@@ -726,7 +778,7 @@ void stratumEvent(WStype_t type, uint8_t* payload, size_t length) {
     }
 }
 
-// ==================== STRATUM CONNECT (definition) ====================
+// ==================== STRATUM CONNECT ====================
 void stratumConnect() {
     if (!btcAddress.isEmpty()) {
         bool useSSL = (poolPort == 4333 || poolPort == 4334 || poolPort == 443);
@@ -753,7 +805,7 @@ void setupWebServer() {
     });
     
     webServer.on("/api/stats", HTTP_GET, [](AsyncWebServerRequest *req) {
-        StaticJsonDocument<1024> doc;
+        JsonDocument doc;
         
         if (!miningActive) {
             doc["status"] = "🔴 Disconnected";
@@ -806,7 +858,7 @@ void setupWebServer() {
     
     webServer.on("/api/config", HTTP_POST, [](AsyncWebServerRequest *req) {}, NULL,
         [](AsyncWebServerRequest *req, uint8_t *data, size_t len, size_t index, size_t total) {
-            StaticJsonDocument<256> doc;
+            JsonDocument doc;
             DeserializationError err = deserializeJson(doc, data, len);
             if (!err) {
                 poolHost = doc["poolHost"].as<String>();
@@ -839,7 +891,7 @@ void setupWebServer() {
     webServer.on("/api/switchpool", HTTP_GET, [](AsyncWebServerRequest *req) {
         switchToNextPool();
         
-        StaticJsonDocument<128> doc;
+        JsonDocument doc;
         doc["ok"] = true;
         doc["pool"] = poolHost + ":" + String(poolPort);
         
@@ -886,7 +938,9 @@ void setup() {
     
     watchdogSetup();
     
+#ifndef ESP8266_NO_RTOS
     submitMutex = xSemaphoreCreateMutex();
+#endif
     
     loadConfig();
     
@@ -930,14 +984,18 @@ void setup() {
     Serial.println("⚠️ Web Dashboard disabled (Lite mode)");
 #endif
     
-    // Create mining tasks
-#if CORE_COUNT == 2
+    // Create mining tasks (only if FreeRTOS available)
+#ifdef ESP8266_NO_RTOS
+    Serial.println("⚡ Single-core mining (non-RTOS loop)");
+#else
+  #if CORE_COUNT == 2
     xTaskCreatePinnedToCore(miningTask, "MiningTask0", 10240, (void*)0, 1, &miningTask0, 0);
     xTaskCreatePinnedToCore(miningTask, "MiningTask1", 10240, (void*)1, 1, &miningTask1, 1);
     Serial.println("⚡ Dual-core mining (10KB stack each)");
-#else
+  #else
     xTaskCreate(miningTask, "MiningTask", 8192, (void*)0, 1, &miningTask0);
     Serial.println("⚡ Single-core mining (8KB stack)");
+  #endif
 #endif
     
     Serial.println("\n================================================");
@@ -961,12 +1019,24 @@ void loop() {
     watchdogReset();
     stratumWS.loop();
     
+#ifndef ESP8266_NO_RTOS
+    // FreeRTOS version: tasks handle mining, loop just handles reporting
     if (solutionFound) {
         stratumSubmit(nonceFound);
         solutionFound = false;
         jobReceived = false;
         shouldStopMining = true;
     }
+#else
+    // Non-RTOS version: run mining directly
+    miningLoop();
+    if (solutionFound) {
+        stratumSubmit(nonceFound);
+        solutionFound = false;
+        jobReceived = false;
+        shouldStopMining = true;
+    }
+#endif
     
     if (millis() - lastReport > 2000) {
         float hr0 = hashesCore0 / 2.0f;
