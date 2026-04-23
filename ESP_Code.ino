@@ -1,17 +1,9 @@
 /*
- * ESP32/ESP8266 Lottery Miner v1.3 - Auto Core Detection (Fixed)
- * Compiles on ESP8266 (no FreeRTOS), ESP32-S2/C3 (fix Serial), and standard ESP32.
+ * ESP32/ESP8266 Lottery Miner v1.3 - Auto Core Detection (Final Clean)
+ * No Serial override here; platformio.ini handles it for S2/C3/S3.
  */
 
 #include <Arduino.h>
-
-// For ESP32 variants where Serial may not be defined (S2, C3, S3)
-#if defined(ESP32)
-  #include <HardwareSerial.h>
-  #if !defined(Serial)
-    #define Serial Serial0
-  #endif
-#endif
 
 // ==================== PLATFORM DETECTION ====================
 #if defined(ESP8266)
@@ -19,14 +11,13 @@
     #include <ESP8266mDNS.h>
     #define PLATFORM_NAME "ESP8266"
     #define PLATFORM_SINGLE_CORE
-    #define ESP8266_NO_RTOS    // flag to disable FreeRTOS code
+    #define ESP8266_NO_RTOS
 #elif defined(ESP32)
     #include <WiFi.h>
     #include <ESPmDNS.h>
     #include "esp_task_wdt.h"
     #include <Preferences.h>
     
-    // Detect ESP32 variant
     #if defined(CONFIG_FREERTOS_UNICORE) || defined(ESP32S2) || defined(ESP32C3) || defined(ESP32S3)
         #define PLATFORM_SINGLE_CORE
         #if defined(ESP32S2)
@@ -48,7 +39,6 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 
-// Conditional includes for Web Dashboard
 #ifndef DISABLE_WEB_DASHBOARD
   #ifdef ESP32
     #include <AsyncTCP.h>
@@ -86,20 +76,13 @@
 #define MDNS_NAME      "esp-miner"
 #define WDT_TIMEOUT    30
 
-// Avoid redefinition with platformio.ini
 #ifndef MINER_VERSION
   #define MINER_VERSION "1.3"
 #endif
 
-// Backup pools
-const char* backupPools[] = {
-    "public-pool.io",       // 0: TCP 3333
-    "public-pool.io",       // 1: TLS 4333
-    "pool.vkbit.com",       // 2: TCP 3333
-    "stratum.slushpool.com" // 3: TCP 3333
-};
-const uint16_t backupPorts[] = {3333, 4333, 3333, 3333};
-const bool backupUseSSL[] = {false, true, false, false};
+const char* backupPools[] = {"public-pool.io","public-pool.io","pool.vkbit.com","stratum.slushpool.com"};
+const uint16_t backupPorts[] = {3333,4333,3333,3333};
+const bool backupUseSSL[] = {false,true,false,false};
 const int NUM_BACKUP_POOLS = 4;
 int currentPoolIndex = 0;
 
@@ -147,7 +130,6 @@ unsigned long lastJobTime = 0;
 unsigned long lastReport = 0;
 unsigned long lastReconnectAttempt = 0;
 
-// FreeRTOS objects – only for ESP32 (all variants)
 #ifndef ESP8266_NO_RTOS
   #if CORE_COUNT == 2
       TaskHandle_t miningTask0 = NULL;
