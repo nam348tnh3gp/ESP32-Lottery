@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        env: [esp32dev, esp32-s3, esp32-c3, esp32-light, esp32-4mb, esp32-max-perf]
+        env: [esp32dev, esp32-s3, esp32-c3, esp32-light, esp32-4mb]
     
     steps:
       - uses: actions/checkout@v4
