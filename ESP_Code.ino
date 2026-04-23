@@ -1,7 +1,8 @@
 /*
- * ESP32 Lottery Miner v1.2 - Full Features + TLS Support
- * - Dual-Core Mining
- * - Watchdog Timer
+ * ESP32/ESP8266 Lottery Miner v1.3 - Auto Core Detection
+ * - Auto-detect single/dual core
+ * - Full cross-platform support (ESP32/S2/C3/S3/ESP8266)
+ * - Watchdog Timer (platform-adaptive)
  * - Auto Pool Failover (TCP + TLS)
  * - Manual Pool Switch
  * - WiFi Manager
@@ -9,30 +10,68 @@
  * - TLS/SSL Support (WSS)
  */
 
-#include <WiFi.h>
+#include <Arduino.h>
+
+// ==================== PLATFORM DETECTION ====================
+#if defined(ESP8266)
+    #include <ESP8266WiFi.h>
+    #include <ESP8266mDNS.h>
+    #include <ESPAsyncTCP.h>
+    #define PLATFORM_NAME "ESP8266"
+    #define PLATFORM_SINGLE_CORE
+#elif defined(ESP32)
+    #include <WiFi.h>
+    #include <ESPmDNS.h>
+    #include <AsyncTCP.h>
+    
+    // Detect ESP32 variant
+    #if defined(CONFIG_FREERTOS_UNICORE) || defined(ESP32S2) || defined(ESP32C3) || defined(ESP32S3)
+        #define PLATFORM_SINGLE_CORE
+        #if defined(ESP32S2)
+            #define PLATFORM_NAME "ESP32-S2"
+        #elif defined(ESP32C3)
+            #define PLATFORM_NAME "ESP32-C3"
+        #elif defined(ESP32S3)
+            #define PLATFORM_NAME "ESP32-S3"
+        #else
+            #define PLATFORM_NAME "ESP32 (Unicore)"
+        #endif
+    #else
+        #define PLATFORM_DUAL_CORE
+        #define PLATFORM_NAME "ESP32"
+    #endif
+#endif
+
 #include <WiFiManager.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-#include <ESPmDNS.h>
 #include <Preferences.h>
-#include "esp_task_wdt.h"
 #include "DSHA2.h"
+
+#ifdef ESP32
+    #include "esp_task_wdt.h"
+#endif
 
 // Conditional includes - chỉ include khi KHÔNG disable
 #ifndef DISABLE_WEB_DASHBOARD
-#include <AsyncTCP.h>
-#include <ESPAsyncWebServer.h>
+    #include <ESPAsyncWebServer.h>
 #endif
 
-// ==================== SINGLE CORE DETECTION ====================
+// ==================== AUTO CORE DETECTION ====================
 #ifdef SINGLE_CORE_MODE
-    #warning "Single core mode enabled - Mining will use only 1 core"
-    #undef MINING_DUAL_CORE
-    #define MINING_DUAL_CORE 0
+    #warning "Single core mode forced by user"
+    #ifdef PLATFORM_DUAL_CORE
+        #undef PLATFORM_DUAL_CORE
+        #define PLATFORM_SINGLE_CORE
+    #endif
 #endif
 
-#ifndef MINING_DUAL_CORE
+#ifdef PLATFORM_DUAL_CORE
     #define MINING_DUAL_CORE 1
+    #define CORE_COUNT 2
+#else
+    #define MINING_DUAL_CORE 0
+    #define CORE_COUNT 1
 #endif
 
 // ==================== CONFIG ====================
@@ -43,7 +82,7 @@
 #define PREF_WALLET    "wallet"
 #define MDNS_NAME      "esp-miner"
 #define WDT_TIMEOUT    30
-#define MINER_VERSION  "3.1"
+#define MINER_VERSION  "1.3"
 
 // Backup pools list - Hỗ trợ cả TCP và TLS
 const char* backupPools[] = {
@@ -64,7 +103,19 @@ String btcAddress = "";
 String walletName = "ESP32";
 
 // ==================== GLOBALS ====================
-Preferences prefs;
+#if defined(ESP32)
+    Preferences prefs;
+#else
+    #include <EEPROM.h>
+    // ESP8266 lưu config đơn giản vào EEPROM
+    struct Config {
+        char poolHost[32] = "public-pool.io";
+        uint16_t poolPort = 3333;
+        char btcAddress[64] = "";
+        char walletName[16] = "ESP8266";
+    } config;
+#endif
+
 WebSocketsClient stratumWS;
 DSHA256 sha;
 
@@ -96,8 +147,12 @@ unsigned long lastReport = 0;
 unsigned long lastReconnectAttempt = 0;
 
 // RTOS
-TaskHandle_t miningTask0 = NULL;
-TaskHandle_t miningTask1 = NULL;
+#if CORE_COUNT == 2
+    TaskHandle_t miningTask0 = NULL;
+    TaskHandle_t miningTask1 = NULL;
+#else
+    TaskHandle_t miningTask0 = NULL;
+#endif
 SemaphoreHandle_t submitMutex;
 
 // ==================== HTML DASHBOARD (chỉ khi không disable) ====================
@@ -106,7 +161,7 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
-    <title>ESP32 Lottery Miner v3.1</title>
+    <title>ESP Miner v4.0 - Auto Core</title>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
     <style>
         body { font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; }
@@ -120,8 +175,6 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
         .status { color: #0f0; }
         .config-panel { display: none; }
         .ip-box { background: #0f3460; padding: 10px; border-radius: 5px; font-family: monospace; }
-        .core-stats { display: flex; gap: 10px; }
-        .core-box { flex: 1; background: #0f3460; padding: 10px; border-radius: 5px; text-align: center; }
         .btn-group { display: flex; flex-wrap: wrap; gap: 5px; }
         .btn-group button { flex: 1; min-width: 120px; }
         .pool-badge { 
@@ -142,6 +195,15 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
             font-size: 0.8em;
             margin-left: 5px;
         }
+        .chip-badge {
+            display: inline-block;
+            background: #ff6600;
+            color: white;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.8em;
+            margin-left: 5px;
+        }
         .info-note {
             background: #0f3460;
             padding: 10px;
@@ -152,7 +214,7 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
     </style>
 </head>
 <body>
-    <h1>🎰 ESP32 Lottery Miner v3.1</h1>
+    <h1>🎰 ESP Miner v4.0 <span id='chipBadge' class='chip-badge'>Auto-Detect</span></h1>
     
     <div class='card'>
         <span class='label'>🌐 Dashboard Access:</span><br>
@@ -177,16 +239,7 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
         <div id='hashrate' class='value'>0.00 H/s</div>
     </div>
     
-    <div class='core-stats'>
-        <div class='core-box'>
-            <span class='label'>Core 0 Hashrate</span>
-            <div id='hashrate0' style='font-size:1.5em;color:#0f0;'>0.00 H/s</div>
-        </div>
-        <div class='core-box'>
-            <span class='label'>Core 1 Hashrate</span>
-            <div id='hashrate1' style='font-size:1.5em;color:#0f0;'>0.00 H/s</div>
-        </div>
-    </div>
+    <div id='coreStatsContainer'></div>
     
     <div class='card'>
         <span class='label'>📊 Total Hashes:</span>
@@ -204,12 +257,6 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
         <div style='margin-top:10px;'>
             <span class='label'>🔄 Backup Pools:</span>
             <div id='backupPools' style='color:#aaa; margin-top:5px;'>-</div>
-        </div>
-        <div class='info-note'>
-            💡 <strong>Pool Format:</strong><br>
-            • TCP (không mã hóa): port 3333<br>
-            • TLS/SSL (mã hóa): port 4333<br>
-            • Username: <code>BTC_ADDRESS.WORKER</code>
         </div>
     </div>
     
@@ -236,8 +283,8 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
         
         <label>Port:</label>
         <select id='poolPort'>
-            <option value='3333'>3333 (TCP - Không mã hóa)</option>
-            <option value='4333'>4333 (TLS/SSL - Mã hóa)</option>
+            <option value='3333'>3333 (TCP)</option>
+            <option value='4333'>4333 (TLS/SSL)</option>
         </select>
         
         <label>BTC Address:</label>
@@ -250,6 +297,8 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
     </div>
 
     <script>
+        let coreCount = 1;
+        
         function toggleConfig() {
             var p = document.getElementById('configPanel');
             p.style.display = p.style.display == 'block' ? 'none' : 'block';
@@ -290,15 +339,40 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
         }
         
         function restartMiner() {
-            if(confirm('Restart ESP32 miner?')) {
+            if(confirm('Restart miner?')) {
                 fetch('/api/restart');
                 setTimeout(() => location.reload(), 3000);
             }
         }
         
         function resetWiFi() {
-            if(confirm('Reset WiFi settings? Device will reboot to AP mode (192.168.4.1).')) {
+            if(confirm('Reset WiFi settings? Device will reboot to AP mode.')) {
                 fetch('/api/resetwifi');
+            }
+        }
+        
+        function updateCoreStats(data) {
+            let container = document.getElementById('coreStatsContainer');
+            if (data.coreCount != coreCount) {
+                coreCount = data.coreCount;
+                let html = '<div class="card"><span class="label">💻 CPU Cores:</span> ' + coreCount + '</div>';
+                if (coreCount == 2) {
+                    html += '<div style="display:flex; gap:10px;">' +
+                        '<div class="card" style="flex:1; background:#0f3460; text-align:center;">' +
+                            '<span class="label">Core 0</span>' +
+                            '<div id="hashrate0" style="font-size:1.5em;color:#0f0;">0.00 H/s</div>' +
+                        '</div>' +
+                        '<div class="card" style="flex:1; background:#0f3460; text-align:center;">' +
+                            '<span class="label">Core 1</span>' +
+                            '<div id="hashrate1" style="font-size:1.5em;color:#0f0;">0.00 H/s</div>' +
+                        '</div>' +
+                    '</div>';
+                }
+                container.innerHTML = html;
+            }
+            if (coreCount == 2) {
+                document.getElementById('hashrate0').innerHTML = data.hashrate0 + ' H/s';
+                document.getElementById('hashrate1').innerHTML = data.hashrate1 + ' H/s';
             }
         }
         
@@ -306,8 +380,6 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
             fetch('/api/stats').then(r => r.json()).then(d => {
                 document.getElementById('status').innerHTML = d.status;
                 document.getElementById('hashrate').innerHTML = d.hashrate + ' H/s';
-                document.getElementById('hashrate0').innerHTML = d.hashrate0 + ' H/s';
-                document.getElementById('hashrate1').innerHTML = d.hashrate1 + ' H/s';
                 document.getElementById('totalHashes').innerHTML = d.totalHashes;
                 document.getElementById('nonce').innerHTML = d.nonceStart + ' - ' + d.nonceEnd;
                 document.getElementById('poolInfo').innerHTML = d.pool;
@@ -315,10 +387,12 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
                 document.getElementById('btcInfo').innerHTML = d.btcAddress || 'Not set';
                 document.getElementById('workerInfo').innerHTML = d.worker;
                 document.getElementById('ipAddress').innerHTML = d.ip;
+                document.getElementById('chipBadge').innerHTML = d.chip + ' (' + d.coreCount + ' cores)';
                 document.getElementById('poolHost').value = d.poolHost;
                 document.getElementById('poolPort').value = d.poolPort;
                 document.getElementById('btcAddr').value = d.btcAddress;
                 document.getElementById('walletName').value = d.wallet;
+                updateCoreStats(d);
             });
         }
         
@@ -330,7 +404,56 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
 )rawliteral";
 #endif // DISABLE_WEB_DASHBOARD
 
-// ==================== UTILS ====================
+// ==================== PLATFORM-SPECIFIC UTILS ====================
+#ifdef ESP8266
+void loadConfig() {
+    EEPROM.begin(sizeof(Config));
+    EEPROM.get(0, config);
+    EEPROM.end();
+    poolHost = String(config.poolHost);
+    poolPort = config.poolPort;
+    btcAddress = String(config.btcAddress);
+    walletName = String(config.walletName);
+}
+
+void saveConfigEEPROM() {
+    strncpy(config.poolHost, poolHost.c_str(), 31);
+    config.poolPort = poolPort;
+    strncpy(config.btcAddress, btcAddress.c_str(), 63);
+    strncpy(config.walletName, walletName.c_str(), 15);
+    EEPROM.begin(sizeof(Config));
+    EEPROM.put(0, config);
+    EEPROM.commit();
+    EEPROM.end();
+}
+
+void saveCurrentPool() {
+    strncpy(config.poolHost, poolHost.c_str(), 31);
+    config.poolPort = poolPort;
+    EEPROM.begin(sizeof(Config));
+    EEPROM.put(0, config);
+    EEPROM.commit();
+    EEPROM.end();
+}
+#else
+void loadConfig() {
+    prefs.begin(PREF_NAMESPACE, false);
+    poolHost = prefs.getString(PREF_POOL_HOST, "public-pool.io");
+    poolPort = prefs.getUShort(PREF_POOL_PORT, 3333);
+    btcAddress = prefs.getString(PREF_BTC_ADDR, "");
+    walletName = prefs.getString(PREF_WALLET, "ESP32");
+    prefs.end();
+}
+
+void saveCurrentPool() {
+    prefs.begin(PREF_NAMESPACE, false);
+    prefs.putString(PREF_POOL_HOST, poolHost);
+    prefs.putUShort(PREF_POOL_PORT, poolPort);
+    prefs.end();
+}
+#endif
+
+// ==================== SHARED UTILS ====================
 uint8_t hexToByte(char c) {
     if (c >= '0' && c <= '9') return c - '0';
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -358,13 +481,6 @@ bool checkTarget(uint8_t* hash) {
         if (hash[i] > target[i]) return false;
     }
     return false;
-}
-
-void saveCurrentPool() {
-    prefs.begin(PREF_NAMESPACE, false);
-    prefs.putString(PREF_POOL_HOST, poolHost);
-    prefs.putUShort(PREF_POOL_PORT, poolPort);
-    prefs.end();
 }
 
 void switchToNextPool() {
@@ -437,18 +553,43 @@ void stratumSubmit(uint32_t foundNonce) {
     Serial.println("🎯 SUBMITTED NONCE: 0x" + String(foundNonce, HEX));
 }
 
-// ==================== MINING TASKS ====================
+// ==================== WATCHDOG PLATFORM-ADAPTIVE ====================
+void watchdogSetup() {
+#ifdef ESP32
+    esp_task_wdt_init(WDT_TIMEOUT, true);
+    esp_task_wdt_add(NULL);
+#endif
+    // ESP8266: SDK tự quản lý WDT, chỉ cần gọi yield()/delay() thường xuyên
+}
+
+void watchdogReset() {
+#ifdef ESP32
+    esp_task_wdt_reset();
+#else
+    yield();
+#endif
+}
+
+// ==================== MINING TASK ====================
 void miningTask(void* parameter) {
     int coreId = (int)parameter;
     Serial.printf("⛏️ Mining task started on Core %d\n", coreId);
     
+#ifdef ESP32
     esp_task_wdt_add(NULL);
+#endif
     
     uint8_t localHeader[80];
-    unsigned long* hashesCounter = (coreId == 0) ? (unsigned long*)&hashesCore0 : (unsigned long*)&hashesCore1;
+    unsigned long* hashesCounter;
+    
+#if CORE_COUNT == 2
+    hashesCounter = (coreId == 0) ? (unsigned long*)&hashesCore0 : (unsigned long*)&hashesCore1;
+#else
+    hashesCounter = (unsigned long*)&hashesCore0;
+#endif
     
     while (true) {
-        esp_task_wdt_reset();
+        watchdogReset();
         
         if (shouldStopMining) {
             vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -460,6 +601,7 @@ void miningTask(void* parameter) {
             
             uint32_t startNonce, endNonce;
             
+#if CORE_COUNT == 2
             if (coreId == 0) {
                 startNonce = nonceStart;
                 endNonce = nonceStart + 0x7FFFFFFF;
@@ -467,6 +609,10 @@ void miningTask(void* parameter) {
                 startNonce = nonceStart + 0x80000000;
                 endNonce = 0xFFFFFFFF;
             }
+#else
+            startNonce = nonceStart;
+            endNonce = nonceStart + 0x00FFFFFF;  // Phạm vi nhỏ hơn cho single core
+#endif
             
             for (uint32_t n = startNonce; n <= endNonce && !solutionFound && !shouldStopMining; n++) {
                 uint32_t nonceLE = n;
@@ -488,9 +634,9 @@ void miningTask(void* parameter) {
                     break;
                 }
                 
-                if ((n & 0x3FF) == 0) {
+                if ((n & 0xFF) == 0) {  // Tăng tần suất reset WDT
                     vTaskDelay(0);
-                    esp_task_wdt_reset();
+                    watchdogReset();
                 }
             }
         }
@@ -655,7 +801,9 @@ void setupWebServer() {
         doc["hashrate1"] = String(hr1, 2);
         doc["totalHashes"] = String(hashesCore0 + hashesCore1);
         doc["nonceStart"] = "0x" + String(nonceStart, HEX);
-        doc["nonceEnd"] = "0x" + String(nonceStart + 0x7FFFFFFF, HEX);
+        doc["nonceEnd"] = "0x" + String(nonceStart + 0x00FFFFFF, HEX);
+        doc["coreCount"] = CORE_COUNT;
+        doc["chip"] = PLATFORM_NAME;
         
         bool currentIsSSL = (poolPort == 4333);
         doc["pool"] = poolHost + ":" + String(poolPort) + 
@@ -697,12 +845,16 @@ void setupWebServer() {
                 if (poolHost.isEmpty()) poolHost = "public-pool.io";
                 if (poolPort == 0) poolPort = 3333;
                 
+#ifdef ESP32
                 prefs.begin(PREF_NAMESPACE, false);
                 prefs.putString(PREF_POOL_HOST, poolHost);
                 prefs.putUShort(PREF_POOL_PORT, poolPort);
                 prefs.putString(PREF_BTC_ADDR, btcAddress);
                 prefs.putString(PREF_WALLET, walletName);
                 prefs.end();
+#else
+                saveConfigEEPROM();
+#endif
                 
                 req->send(200, "application/json", "{\"ok\":true}");
                 delay(500);
@@ -751,19 +903,20 @@ void setupWebServer() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\n\n🎰 ESP32 Lottery Miner v" + String(MINER_VERSION) + " Starting...\n");
     
-    esp_task_wdt_init(WDT_TIMEOUT, true);
-    esp_task_wdt_add(NULL);
+    Serial.println("\n\n╔══════════════════════════════════════════╗");
+    Serial.println("║   🎰 ESP Lottery Miner v" + String(MINER_VERSION) + "           ║");
+    Serial.println("║   Platform: " + String(PLATFORM_NAME));
+    Serial.print("║   Cores: " + String(CORE_COUNT) + " (");
+    Serial.print(CORE_COUNT == 2 ? "Dual" : "Single");
+    Serial.println("-core)            ║");
+    Serial.println("╚══════════════════════════════════════════╝\n");
+    
+    watchdogSetup();
     
     submitMutex = xSemaphoreCreateMutex();
     
-    prefs.begin(PREF_NAMESPACE, false);
-    poolHost = prefs.getString(PREF_POOL_HOST, "public-pool.io");
-    poolPort = prefs.getUShort(PREF_POOL_PORT, 3333);
-    btcAddress = prefs.getString(PREF_BTC_ADDR, "");
-    walletName = prefs.getString(PREF_WALLET, "ESP32");
-    prefs.end();
+    loadConfig();
     
     for (int i = 0; i < NUM_BACKUP_POOLS; i++) {
         if (poolHost == backupPools[i] && poolPort == backupPorts[i]) {
@@ -772,16 +925,16 @@ void setup() {
         }
     }
     
-    Serial.printf("📋 Loaded config - Pool: %s:%d (%s)\n", 
+    Serial.printf("📋 Config - Pool: %s:%d (%s)\n", 
                  poolHost.c_str(), poolPort, 
                  (poolPort == 4333) ? "TLS" : "TCP");
-    Serial.printf("💳 BTC Address: %s\n", btcAddress.isEmpty() ? "Not set" : btcAddress.c_str());
+    Serial.printf("💳 BTC: %s\n", btcAddress.isEmpty() ? "Not set" : btcAddress.c_str());
     Serial.printf("👤 Worker: %s\n", btcAddress.isEmpty() ? "-" : (btcAddress + "." + walletName).c_str());
     
     WiFiManager wm;
     wm.setConfigPortalTimeout(180);
     
-    if (!wm.autoConnect("ESP32-Miner-Setup")) {
+    if (!wm.autoConnect("ESP-Miner-Setup")) {
         Serial.println("Failed to connect, restarting...");
         delay(3000);
         ESP.restart();
@@ -790,42 +943,38 @@ void setup() {
     WiFi.setSleep(false);
     currentIP = WiFi.localIP().toString();
     
-    Serial.println("\n================================================");
-    Serial.println("✅ WiFi connected!");
-    Serial.println("🌐 IP Address: " + currentIP);
+    Serial.println("\n✅ WiFi connected!");
+    Serial.println("🌐 IP: " + currentIP);
     Serial.println("📶 RSSI: " + String(WiFi.RSSI()) + " dBm");
-    Serial.println("================================================");
     
     if (MDNS.begin(MDNS_NAME)) {
         MDNS.addService("http", "tcp", 80);
         Serial.println("📡 mDNS: http://" + String(MDNS_NAME) + ".local");
     }
     
-    #ifndef DISABLE_WEB_DASHBOARD
+#ifndef DISABLE_WEB_DASHBOARD
     setupWebServer();
-    #else
+#else
     Serial.println("⚠️ Web Dashboard disabled (Lite mode)");
-    #endif
+#endif
     
     // ==================== CREATE MINING TASKS ====================
-    #if MINING_DUAL_CORE == 1
-        // Dual core - tạo 2 task trên 2 core khác nhau
-        xTaskCreatePinnedToCore(miningTask, "MiningTask0", 10240, (void*)0, 1, &miningTask0, 0);
-        xTaskCreatePinnedToCore(miningTask, "MiningTask1", 10240, (void*)1, 1, &miningTask1, 1);
-        Serial.println("⚡ Dual-core mining enabled (Stack: 10KB)");
-    #else
-        // Single core - chỉ tạo 1 task trên core 0
-        xTaskCreatePinnedToCore(miningTask, "MiningTask", 10240, (void*)0, 1, &miningTask0, 0);
-        Serial.println("⚡ Single-core mining enabled (Stack: 10KB)");
-    #endif
+#if CORE_COUNT == 2
+    xTaskCreatePinnedToCore(miningTask, "MiningTask0", 10240, (void*)0, 1, &miningTask0, 0);
+    xTaskCreatePinnedToCore(miningTask, "MiningTask1", 10240, (void*)1, 1, &miningTask1, 1);
+    Serial.println("⚡ Dual-core mining (10KB stack each)");
+#else
+    xTaskCreate(miningTask, "MiningTask", 8192, (void*)0, 1, &miningTask0);
+    Serial.println("⚡ Single-core mining (8KB stack)");
+#endif
     
     Serial.println("\n================================================");
-    #ifndef DISABLE_WEB_DASHBOARD
+#ifndef DISABLE_WEB_DASHBOARD
     Serial.println("🔧 Dashboard: http://" + currentIP);
-    #endif
+#endif
     Serial.println("🔄 Auto pool failover: ENABLED (4 pools)");
-    Serial.println("🔒 TLS Support: ENABLED (port 4333)");
-    Serial.println("🛡️ Watchdog: " + String(WDT_TIMEOUT) + "s");
+    Serial.println("🔒 TLS: " + String(poolPort == 4333 ? "ENABLED" : "DISABLED"));
+    Serial.println("🛡️ WDT: " + String(WDT_TIMEOUT) + "s");
     Serial.println("================================================\n");
     
     if (!btcAddress.isEmpty()) {
@@ -837,7 +986,7 @@ void setup() {
 
 // ==================== LOOP ====================
 void loop() {
-    esp_task_wdt_reset();
+    watchdogReset();
     stratumWS.loop();
     
     if (solutionFound) {
@@ -853,16 +1002,16 @@ void loop() {
         currentHashrate = hr0 + hr1;
         
         if (miningActive && jobReceived) {
-            Serial.printf("⚡ %.2f H/s (C0: %.2f, C1: %.2f) | Range: 0x%08X | Pool: %s:%d\n", 
-                         currentHashrate, hr0, hr1, nonceStart, poolHost.c_str(), poolPort);
+            Serial.printf("⚡ %.2f H/s (C0: %.2f, C1: %.2f) | Nonce: 0x%08X | %s\n", 
+                         currentHashrate, hr0, hr1, nonceStart, poolHost.c_str());
         }
         
         lastReport = millis();
         hashesCore0 = 0;
         hashesCore1 = 0;
-        nonceStart += 0x10000000;
+        nonceStart += 0x01000000;
         
-        if (nonceStart > 0xF0000000) {
+        if (nonceStart > 0xFF000000) {
             nonceStart = 0;
         }
     }
@@ -880,7 +1029,7 @@ void loop() {
     if (!stratumWS.isConnected() && !btcAddress.isEmpty() && WiFi.isConnected()) {
         if (millis() - lastReconnectAttempt > 10000) {
             lastReconnectAttempt = millis();
-            Serial.println("🔄 Attempting to reconnect...");
+            Serial.println("🔄 Reconnecting...");
             stratumConnect();
         }
     }
