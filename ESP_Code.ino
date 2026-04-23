@@ -1,28 +1,24 @@
 /*
  * ESP32/ESP8266 Lottery Miner v1.3 - Auto Core Detection
- * - Auto-detect single/dual core
- * - Full cross-platform support (ESP32/S2/C3/S3/ESP8266)
- * - Watchdog Timer (platform-adaptive)
- * - Auto Pool Failover (TCP + TLS)
- * - Manual Pool Switch
- * - WiFi Manager
- * - mDNS
- * - TLS/SSL Support (WSS)
+ * Fixes: forward declaration, conditional includes, Serial on S2, MINER_VERSION redefined
  */
 
 #include <Arduino.h>
+
+// For ESP32-S2 Serial availability in WiFiManager
+#if defined(ESP32S2) || defined(ESP32C3)
+  #include <HardwareSerial.h>
+#endif
 
 // ==================== PLATFORM DETECTION ====================
 #if defined(ESP8266)
     #include <ESP8266WiFi.h>
     #include <ESP8266mDNS.h>
-    #include <ESPAsyncTCP.h>
     #define PLATFORM_NAME "ESP8266"
     #define PLATFORM_SINGLE_CORE
 #elif defined(ESP32)
     #include <WiFi.h>
     #include <ESPmDNS.h>
-    #include <AsyncTCP.h>
     
     // Detect ESP32 variant
     #if defined(CONFIG_FREERTOS_UNICORE) || defined(ESP32S2) || defined(ESP32C3) || defined(ESP32S3)
@@ -45,17 +41,23 @@
 #include <WiFiManager.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-#include <Preferences.h>
-#include "DSHA2.h"
 
 #ifdef ESP32
-    #include "esp_task_wdt.h"
+  #include <Preferences.h>
+  #include "esp_task_wdt.h"
 #endif
 
-// Conditional includes - chỉ include khi KHÔNG disable
+// Conditional includes for Web Dashboard
 #ifndef DISABLE_WEB_DASHBOARD
-    #include <ESPAsyncWebServer.h>
+  #ifdef ESP32
+    #include <AsyncTCP.h>
+  #else
+    #include <ESPAsyncTCP.h>
+  #endif
+  #include <ESPAsyncWebServer.h>
 #endif
+
+#include "DSHA2.h"
 
 // ==================== AUTO CORE DETECTION ====================
 #ifdef SINGLE_CORE_MODE
@@ -82,9 +84,13 @@
 #define PREF_WALLET    "wallet"
 #define MDNS_NAME      "esp-miner"
 #define WDT_TIMEOUT    30
-#define MINER_VERSION  "1.3"
 
-// Backup pools list - Hỗ trợ cả TCP và TLS
+// Avoid redefinition with platformio.ini
+#ifndef MINER_VERSION
+  #define MINER_VERSION "1.3"
+#endif
+
+// Backup pools
 const char* backupPools[] = {
     "public-pool.io",       // 0: TCP 3333
     "public-pool.io",       // 1: TLS 4333
@@ -96,18 +102,16 @@ const bool backupUseSSL[] = {false, true, false, false};
 const int NUM_BACKUP_POOLS = 4;
 int currentPoolIndex = 0;
 
-// Mặc định - Port 3333 cho TCP
 String poolHost = "public-pool.io";
 uint16_t poolPort = 3333;
 String btcAddress = "";
 String walletName = "ESP32";
 
 // ==================== GLOBALS ====================
-#if defined(ESP32)
+#ifdef ESP32
     Preferences prefs;
 #else
     #include <EEPROM.h>
-    // ESP8266 lưu config đơn giản vào EEPROM
     struct Config {
         char poolHost[32] = "public-pool.io";
         uint16_t poolPort = 3333;
@@ -119,12 +123,10 @@ String walletName = "ESP32";
 WebSocketsClient stratumWS;
 DSHA256 sha;
 
-// Conditional web server declaration
 #ifndef DISABLE_WEB_DASHBOARD
 AsyncWebServer webServer(80);
 #endif
 
-// Mining state
 volatile bool jobReceived = false;
 uint8_t header[80];
 uint8_t target[32];
@@ -135,18 +137,15 @@ volatile float currentHashrate = 0.0f;
 volatile bool miningActive = false;
 String currentIP = "";
 
-// Nonce ranges cho dual-core
 volatile uint32_t nonceStart = 0;
 volatile uint32_t nonceFound = 0;
 volatile bool solutionFound = false;
 volatile bool shouldStopMining = false;
 
-// Timing
 unsigned long lastJobTime = 0;
 unsigned long lastReport = 0;
 unsigned long lastReconnectAttempt = 0;
 
-// RTOS
 #if CORE_COUNT == 2
     TaskHandle_t miningTask0 = NULL;
     TaskHandle_t miningTask1 = NULL;
@@ -155,13 +154,16 @@ unsigned long lastReconnectAttempt = 0;
 #endif
 SemaphoreHandle_t submitMutex;
 
-// ==================== HTML DASHBOARD (chỉ khi không disable) ====================
+// ==================== FORWARD DECLARATIONS ====================
+void stratumConnect();   // <-- FIX: forward declaration
+
+// ==================== HTML DASHBOARD ====================
 #ifndef DISABLE_WEB_DASHBOARD
 const char dashboard_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
-    <title>ESP Miner v4.0 - Auto Core</title>
+    <title>ESP Miner v1.3 - Auto Core</title>
     <meta name='viewport' content='width=device-width, initial-scale=1'>
     <style>
         body { font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; }
@@ -177,44 +179,14 @@ const char dashboard_html[] PROGMEM = R"rawliteral(
         .ip-box { background: #0f3460; padding: 10px; border-radius: 5px; font-family: monospace; }
         .btn-group { display: flex; flex-wrap: wrap; gap: 5px; }
         .btn-group button { flex: 1; min-width: 120px; }
-        .pool-badge { 
-            display: inline-block; 
-            background: #e94560; 
-            color: white; 
-            padding: 2px 8px; 
-            border-radius: 12px; 
-            font-size: 0.8em; 
-            margin-left: 5px; 
-        }
-        .tls-badge {
-            display: inline-block;
-            background: #00aa00;
-            color: white;
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-size: 0.8em;
-            margin-left: 5px;
-        }
-        .chip-badge {
-            display: inline-block;
-            background: #ff6600;
-            color: white;
-            padding: 2px 8px;
-            border-radius: 12px;
-            font-size: 0.8em;
-            margin-left: 5px;
-        }
-        .info-note {
-            background: #0f3460;
-            padding: 10px;
-            border-radius: 5px;
-            margin-top: 10px;
-            font-size: 0.9em;
-        }
+        .pool-badge { display: inline-block; background: #e94560; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin-left: 5px; }
+        .tls-badge { display: inline-block; background: #00aa00; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin-left: 5px; }
+        .chip-badge { display: inline-block; background: #ff6600; color: white; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin-left: 5px; }
+        .info-note { background: #0f3460; padding: 10px; border-radius: 5px; margin-top: 10px; font-size: 0.9em; }
     </style>
 </head>
 <body>
-    <h1>🎰 ESP Miner v4.0 <span id='chipBadge' class='chip-badge'>Auto-Detect</span></h1>
+    <h1>🎰 ESP Miner v1.3 <span id='chipBadge' class='chip-badge'>Auto-Detect</span></h1>
     
     <div class='card'>
         <span class='label'>🌐 Dashboard Access:</span><br>
@@ -553,13 +525,12 @@ void stratumSubmit(uint32_t foundNonce) {
     Serial.println("🎯 SUBMITTED NONCE: 0x" + String(foundNonce, HEX));
 }
 
-// ==================== WATCHDOG PLATFORM-ADAPTIVE ====================
+// ==================== WATCHDOG ====================
 void watchdogSetup() {
 #ifdef ESP32
     esp_task_wdt_init(WDT_TIMEOUT, true);
     esp_task_wdt_add(NULL);
 #endif
-    // ESP8266: SDK tự quản lý WDT, chỉ cần gọi yield()/delay() thường xuyên
 }
 
 void watchdogReset() {
@@ -611,7 +582,7 @@ void miningTask(void* parameter) {
             }
 #else
             startNonce = nonceStart;
-            endNonce = nonceStart + 0x00FFFFFF;  // Phạm vi nhỏ hơn cho single core
+            endNonce = nonceStart + 0x00FFFFFF;  // Smaller range for single core
 #endif
             
             for (uint32_t n = startNonce; n <= endNonce && !solutionFound && !shouldStopMining; n++) {
@@ -634,7 +605,7 @@ void miningTask(void* parameter) {
                     break;
                 }
                 
-                if ((n & 0xFF) == 0) {  // Tăng tần suất reset WDT
+                if ((n & 0xFF) == 0) {
                     vTaskDelay(0);
                     watchdogReset();
                 }
@@ -755,6 +726,7 @@ void stratumEvent(WStype_t type, uint8_t* payload, size_t length) {
     }
 }
 
+// ==================== STRATUM CONNECT (definition) ====================
 void stratumConnect() {
     if (!btcAddress.isEmpty()) {
         bool useSSL = (poolPort == 4333 || poolPort == 4334 || poolPort == 443);
@@ -773,7 +745,7 @@ void stratumConnect() {
     }
 }
 
-// ==================== WEB SERVER (chỉ khi không disable) ====================
+// ==================== WEB SERVER ====================
 #ifndef DISABLE_WEB_DASHBOARD
 void setupWebServer() {
     webServer.on("/", HTTP_GET, [](AsyncWebServerRequest *req) {
@@ -958,7 +930,7 @@ void setup() {
     Serial.println("⚠️ Web Dashboard disabled (Lite mode)");
 #endif
     
-    // ==================== CREATE MINING TASKS ====================
+    // Create mining tasks
 #if CORE_COUNT == 2
     xTaskCreatePinnedToCore(miningTask, "MiningTask0", 10240, (void*)0, 1, &miningTask0, 0);
     xTaskCreatePinnedToCore(miningTask, "MiningTask1", 10240, (void*)1, 1, &miningTask1, 1);
