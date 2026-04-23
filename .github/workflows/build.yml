@@ -19,19 +19,15 @@ jobs:
       fail-fast: false
       matrix:
         env: 
-          # ESP32 Dual Core
           - esp32dev
           - esp32-s3
-          # ESP32 Single Core (auto-detect)
           - esp32-s2
           - esp32-c3
           - esp32-c6
-          # ESP32 Special
           - esp32-single
           - esp32-light
           - esp32-4mb
           - esp32-factory-reset
-          # ESP8266
           - esp8266
     
     steps:
@@ -61,34 +57,25 @@ jobs:
       - name: Prepare source files
         run: |
           mkdir -p src
-          # Copy all source files
           cp *.ino src/ 2>/dev/null || true
           cp *.h src/ 2>/dev/null || true
           cp *.c src/ 2>/dev/null || true
           cp *.cpp src/ 2>/dev/null || true
           echo "=== Source files ==="
           ls -la src/
-          echo "=== Root files ==="
-          ls -la
       
-      - name: Install PlatformIO dependencies
+      - name: Install PlatformIO platforms (✅ FIXED)
         run: |
-          pio pkg install --platform espressif32
-          pio pkg install --platform espressif8266
-          pio pkg install
+          # Cài cả 2 platform TRƯỚC KHI cài dependencies
+          pio platform install espressif32
+          pio platform install espressif8266
+      
+      - name: Install project dependencies
+        run: pio pkg install
       
       - name: Build ${{ matrix.env }}
         id: build
-        run: |
-          echo "Building environment: ${{ matrix.env }}"
-          # Xác định platform
-          if [ "${{ matrix.env }}" = "esp8266" ]; then
-            PLATFORM="espressif8266"
-          else
-            PLATFORM="espressif32"
-          fi
-          echo "Platform: $PLATFORM"
-          pio run -e ${{ matrix.env }}
+        run: pio run -e ${{ matrix.env }}
         continue-on-error: ${{ matrix.env == 'esp32-c6' }}
       
       - name: Find firmware binary
@@ -99,12 +86,11 @@ jobs:
           echo "Searching in: $BUILD_DIR"
           ls -la "$BUILD_DIR/" || true
           
-          # Tìm firmware.bin
           if [ -f "$BUILD_DIR/firmware.bin" ]; then
             echo "firmware_path=$BUILD_DIR/firmware.bin" >> $GITHUB_OUTPUT
             echo "Found: firmware.bin"
           else
-            echo "⚠️ No firmware.bin found, checking for other binaries..."
+            echo "⚠️ No firmware.bin found"
             ls -la "$BUILD_DIR/" || true
           fi
       
@@ -142,7 +128,7 @@ jobs:
           if [ "${{ steps.build.outcome }}" = "success" ]; then
             STATUS="✅ Success"
           else
-            STATUS="⚠️ ${{ steps.build.outcome }}"
+            STATUS="❌ Failed"
           fi
           
           echo "| \`${{ matrix.env }}\` | $CHIP | $CORES | $STATUS |" >> $GITHUB_STEP_SUMMARY
@@ -174,17 +160,14 @@ jobs:
           cd release
           mkdir -p ESP32-Miner-v1.3
           
-          # Copy tất cả firmware
           for dir in */; do
             env_name="${dir%/}"
-            # Bỏ qua file zip nếu có
             if [ "$env_name" != "ESP32-Miner-v1.3" ]; then
               mkdir -p "ESP32-Miner-v1.3/$env_name"
               cp "$dir"/* "ESP32-Miner-v1.3/$env_name/" 2>/dev/null || true
             fi
           done
           
-          # Nén thành 1 file
           zip -r "ESP32-Miner-v1.3-All-Firmwares.zip" ESP32-Miner-v1.3/
           
           echo "=== Release contents ==="
