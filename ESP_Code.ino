@@ -35,6 +35,31 @@
     #endif
 #endif
 
+// ==================== HASH WRAPPER ====================
+#if defined(ESP8266)
+  // ESP8266: dùng phần mềm unroll (DSHA2.h)
+  #include "DSHA2.h"
+#elif defined(ESP32)
+  // Các dòng ESP32 có hardware SHA (S2, S3, C3, C6, H2, C2)
+  #if defined(ESP32S2) || defined(ESP32S3) || defined(ESP32C3) || defined(ESP32C6) || defined(ESP32H2) || defined(ESP32C2)
+    #include <mbedtls/sha256.h>
+    class DSHA256 {
+    public:
+      void hashBlockHeader(const unsigned char header[80], unsigned char hash[32]) {
+        unsigned char firstHash[32];
+        mbedtls_sha256_ret(header, 80, firstHash, 0);   // lần 1
+        mbedtls_sha256_ret(firstHash, 32, hash, 0);     // lần 2 (double SHA)
+      }
+    };
+  #else
+    // ESP32 gốc (ESP32‑WROOM, WROVER…) không có HW SHA → dùng phần mềm unroll
+    #include "DSHA2.h"
+  #endif
+#else
+  // Các board khác (hiếm) dùng DSHA2.h
+  #include "DSHA2.h"
+#endif
+
 #include <WiFiManager.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
@@ -47,8 +72,6 @@
   #endif
   #include <ESPAsyncWebServer.h>
 #endif
-
-#include "DSHA2.h"
 
 // ==================== AUTO CORE DETECTION ====================
 #ifdef SINGLE_CORE_MODE
