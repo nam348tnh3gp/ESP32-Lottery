@@ -24,6 +24,17 @@
 #include <ESPAsyncWebServer.h>
 #endif
 
+// ==================== SINGLE CORE DETECTION ====================
+#ifdef SINGLE_CORE_MODE
+    #warning "Single core mode enabled - Mining will use only 1 core"
+    #undef MINING_DUAL_CORE
+    #define MINING_DUAL_CORE 0
+#endif
+
+#ifndef MINING_DUAL_CORE
+    #define MINING_DUAL_CORE 1
+#endif
+
 // ==================== CONFIG ====================
 #define PREF_NAMESPACE "miner"
 #define PREF_POOL_HOST "pool_host"
@@ -379,7 +390,6 @@ void stratumSubscribe() {
     doc["method"] = "mining.subscribe";
     JsonArray params = doc.createNestedArray("params");
     
-    // User agent: <worker_name>/<version>
     String userAgent = walletName + "/" + MINER_VERSION;
     params.add(userAgent);
     
@@ -396,10 +406,9 @@ void stratumAuthorize() {
     doc["method"] = "mining.authorize";
     JsonArray params = doc.createNestedArray("params");
     
-    // Format: <BTC_ADDRESS>.<WORKER_NAME>
     String username = btcAddress + "." + walletName;
     params.add(username);
-    params.add("x");  // Password luôn là "x" cho public-pool
+    params.add("x");
     
     String json;
     serializeJson(doc, json);
@@ -414,7 +423,6 @@ void stratumSubmit(uint32_t foundNonce) {
     doc["method"] = "mining.submit";
     JsonArray params = doc.createNestedArray("params");
     
-    // Format: <BTC_ADDRESS>.<WORKER_NAME>
     String username = btcAddress + "." + walletName;
     params.add(username);
     params.add(jobId);
@@ -499,11 +507,7 @@ void stratumEvent(WStype_t type, uint8_t* payload, size_t length) {
             miningActive = false;
             jobReceived = false;
             shouldStopMining = true;
-            
-            // Auto failover to next pool
             switchToNextPool();
-            
-            // Reconnect after delay
             delay(3000);
             stratumConnect();
             break;
@@ -633,7 +637,6 @@ void setupWebServer() {
     webServer.on("/api/stats", HTTP_GET, [](AsyncWebServerRequest *req) {
         StaticJsonDocument<1024> doc;
         
-        // Status
         if (!miningActive) {
             doc["status"] = "🔴 Disconnected";
         } else if (!jobReceived) {
@@ -665,7 +668,6 @@ void setupWebServer() {
         doc["ip"] = currentIP;
         doc["version"] = MINER_VERSION;
         
-        // Backup pools list
         String backupList = "";
         for (int i = 0; i < NUM_BACKUP_POOLS; i++) {
             if (i > 0) backupList += " → ";
@@ -751,14 +753,11 @@ void setup() {
     delay(1000);
     Serial.println("\n\n🎰 ESP32 Lottery Miner v" + String(MINER_VERSION) + " Starting...\n");
     
-    // Initialize watchdog
     esp_task_wdt_init(WDT_TIMEOUT, true);
     esp_task_wdt_add(NULL);
     
-    // Create mutex
     submitMutex = xSemaphoreCreateMutex();
     
-    // Load config
     prefs.begin(PREF_NAMESPACE, false);
     poolHost = prefs.getString(PREF_POOL_HOST, "public-pool.io");
     poolPort = prefs.getUShort(PREF_POOL_PORT, 3333);
@@ -766,7 +765,6 @@ void setup() {
     walletName = prefs.getString(PREF_WALLET, "ESP32");
     prefs.end();
     
-    // Find current pool index in backup list
     for (int i = 0; i < NUM_BACKUP_POOLS; i++) {
         if (poolHost == backupPools[i] && poolPort == backupPorts[i]) {
             currentPoolIndex = i;
@@ -780,7 +778,6 @@ void setup() {
     Serial.printf("💳 BTC Address: %s\n", btcAddress.isEmpty() ? "Not set" : btcAddress.c_str());
     Serial.printf("👤 Worker: %s\n", btcAddress.isEmpty() ? "-" : (btcAddress + "." + walletName).c_str());
     
-    // WiFi Manager
     WiFiManager wm;
     wm.setConfigPortalTimeout(180);
     
@@ -791,7 +788,6 @@ void setup() {
     }
     
     WiFi.setSleep(false);
-    
     currentIP = WiFi.localIP().toString();
     
     Serial.println("\n================================================");
@@ -800,34 +796,38 @@ void setup() {
     Serial.println("📶 RSSI: " + String(WiFi.RSSI()) + " dBm");
     Serial.println("================================================");
     
-    // mDNS
     if (MDNS.begin(MDNS_NAME)) {
         MDNS.addService("http", "tcp", 80);
         Serial.println("📡 mDNS: http://" + String(MDNS_NAME) + ".local");
     }
     
-    // Web server (chỉ khi không disable)
     #ifndef DISABLE_WEB_DASHBOARD
     setupWebServer();
     #else
     Serial.println("⚠️ Web Dashboard disabled (Lite mode)");
     #endif
     
-    // Create mining tasks on both cores (10KB stack)
-    xTaskCreatePinnedToCore(miningTask, "MiningTask0", 10240, (void*)0, 1, &miningTask0, 0);
-    xTaskCreatePinnedToCore(miningTask, "MiningTask1", 10240, (void*)1, 1, &miningTask1, 1);
+    // ==================== CREATE MINING TASKS ====================
+    #if MINING_DUAL_CORE == 1
+        // Dual core - tạo 2 task trên 2 core khác nhau
+        xTaskCreatePinnedToCore(miningTask, "MiningTask0", 10240, (void*)0, 1, &miningTask0, 0);
+        xTaskCreatePinnedToCore(miningTask, "MiningTask1", 10240, (void*)1, 1, &miningTask1, 1);
+        Serial.println("⚡ Dual-core mining enabled (Stack: 10KB)");
+    #else
+        // Single core - chỉ tạo 1 task trên core 0
+        xTaskCreatePinnedToCore(miningTask, "MiningTask", 10240, (void*)0, 1, &miningTask0, 0);
+        Serial.println("⚡ Single-core mining enabled (Stack: 10KB)");
+    #endif
     
     Serial.println("\n================================================");
     #ifndef DISABLE_WEB_DASHBOARD
     Serial.println("🔧 Dashboard: http://" + currentIP);
     #endif
-    Serial.println("⚡ Dual-core mining enabled (Stack: 10KB)");
     Serial.println("🔄 Auto pool failover: ENABLED (4 pools)");
     Serial.println("🔒 TLS Support: ENABLED (port 4333)");
     Serial.println("🛡️ Watchdog: " + String(WDT_TIMEOUT) + "s");
     Serial.println("================================================\n");
     
-    // Connect to pool
     if (!btcAddress.isEmpty()) {
         stratumConnect();
     } else {
