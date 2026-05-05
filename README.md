@@ -10,7 +10,14 @@ A "lottery" Bitcoin miner that turns your ESP32/ESP8266 into a 24/7 lottery tick
 Supports **ESP32, ESP32‑S2, ESP32‑C3, ESP32‑S3, ESP32‑C6(coming soo), ESP8266** with automatic core detection, WiFi Manager, Web Dashboard, and Auto Pool Failover.
 
 ---
+## ⚠️ Disclaimer
 
+This project is intended **exclusively for educational and research purposes** to demonstrate the capabilities of ESP32 microcontrollers and the principles of the SHA-256 algorithm and Stratum protocol.
+
+*   **Not a Money-Making Tool**: This is a "lottery miner". The probability of it successfully mining a full Bitcoin block is astronomically low. You are likely to incur electricity, hardware, and time costs without any financial return.
+*   **No Financial Advice**: Nothing here constitutes financial or investment advice.
+*   **Use at Your Own Risk**: The author(s) assume no liability for any damages, financial losses, or legal consequences resulting from the use of this software. You are solely responsible for complying with all applicable laws in your jurisdiction.
+*   **Responsible Use**: This software must not be used for any unauthorized access, botnet creation, or any other illegal activities. By using this software, you agree to these terms.
 ## ✨ Features
 
 | Feature | Description |
