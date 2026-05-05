@@ -72,6 +72,11 @@ jobs:
       
       - name: Install project dependencies
         run: pio pkg install
+      # Thêm bước này trong workflow của bạn, ngay sau bước "Install project dependencies"
+     
+      - name: Patch arduinoWebSockets for ESP32-C6
+        run: |
+         sed -i 's/randomSeed(READ_PERI_REG(DR_REG_RNG_BASE));/randomSeed(millis());/' .pio/libdeps/esp32-c6/arduinoWebSockets/src/WebSocketsServer.cpp
       
       - name: Build ${{ matrix.env }}
         id: build
