@@ -39,7 +39,7 @@ jobs:
           path: |
             ~/.platformio
             .pio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'platformio-c6.ini') }}
           restore-keys: |
             pio-${{ runner.os }}-
       
@@ -64,20 +64,25 @@ jobs:
           echo "=== Source files ==="
           ls -la src/
       
-      - name: Install PlatformIO platforms (✅ FIXED)
+      - name: Install PlatformIO platforms (for standard boards)
         run: |
-          # Cài cả 2 platform TRƯỚC KHI cài dependencies
           pio platform install espressif32
           pio platform install espressif8266
       
-      - name: Install project dependencies
+      - name: Install project dependencies (standard)
         run: pio pkg install
-      # Thêm bước này trong workflow của bạn, ngay sau bước "Install project dependencies"
-     
-      - name: Patch arduinoWebSockets for ESP32-C6
-        run: |
-         sed -i 's/randomSeed(READ_PERI_REG(DR_REG_RNG_BASE));/randomSeed(millis());/' .pio/libdeps/esp32-c6/arduinoWebSockets/src/WebSocketsServer.cpp
       
+      # === CHỈ DÀNH CHO ESP32-C6 ===
+      - name: Install dependencies for ESP32-C6
+        if: matrix.env == 'esp32-c6'
+        run: pio pkg install -c platformio-c6.ini -e esp32-c6
+      
+      - name: Patch arduinoWebSockets for ESP32-C6
+        if: matrix.env == 'esp32-c6'
+        run: |
+          sed -i 's/randomSeed(READ_PERI_REG(DR_REG_RNG_BASE));/randomSeed(millis());/' .pio/libdeps/esp32-c6/arduinoWebSockets/src/WebSocketsServer.cpp
+      # ================================
+
       - name: Build ${{ matrix.env }}
         id: build
         run: |
