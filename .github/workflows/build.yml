@@ -75,7 +75,13 @@ jobs:
       
       - name: Build ${{ matrix.env }}
         id: build
-        run: pio run -e ${{ matrix.env }}
+        run: |
+          if [ "${{ matrix.env }}" = "esp32-c6" ]; then
+            echo "::notice::Building ESP32-C6 with platformio-c6.ini"
+            pio run -c platformio-c6.ini -e esp32-c6
+          else
+            pio run -e ${{ matrix.env }}
+          fi
         continue-on-error: ${{ matrix.env == 'esp32-c6' }}
       
       - name: Find firmware binary
