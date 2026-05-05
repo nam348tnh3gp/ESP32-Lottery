@@ -61,7 +61,17 @@
 #endif
 
 #include <WiFiManager.h>
-#include <WebSocketsClient.h>
+// ==================== WEBSOCKETS: Tự động chọn thư viện phù hợp ====================
+// Core 3.x (ESP32-C6, C3 mới...) đã có sẵn WebSockets trong framework
+// Core 2.x & ESP8266 cần thư viện links2004/WebSockets từ registry
+#ifdef ESP32C6
+  // ESP32-C6 dùng Core 3.x - WebSockets có sẵn, không cần include đặc biệt
+  // (Các header cần thiết đã được core tự động include khi dùng WebSocketsClient)
+  #include <WebSocketsClient.h>  // Vẫn include, nhưng core 3.x sẽ xử lý nội bộ
+#else
+  // Các board còn lại: ESP32, S2, S3, C3 (core cũ), ESP8266
+  #include <WebSocketsClient.h>  // links2004/WebSockets từ lib_deps
+#endif
 #include <ArduinoJson.h>
 
 #ifndef DISABLE_WEB_DASHBOARD
