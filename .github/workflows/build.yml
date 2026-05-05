@@ -39,7 +39,7 @@ jobs:
           path: |
             ~/.platformio
             .pio
-          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'platformio-c6.ini') }}
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
           restore-keys: |
             pio-${{ runner.os }}-
       
@@ -64,34 +64,18 @@ jobs:
           echo "=== Source files ==="
           ls -la src/
       
-      - name: Install PlatformIO platforms (for standard boards)
+      - name: Install PlatformIO platforms (✅ FIXED)
         run: |
+          # Cài cả 2 platform TRƯỚC KHI cài dependencies
           pio platform install espressif32
           pio platform install espressif8266
       
-      - name: Install project dependencies (standard)
+      - name: Install project dependencies
         run: pio pkg install
       
-      # === CHỈ DÀNH CHO ESP32-C6 ===
-      - name: Install dependencies for ESP32-C6
-        if: matrix.env == 'esp32-c6'
-        run: pio pkg install -c platformio-c6.ini -e esp32-c6
-      
-      - name: Patch arduinoWebSockets for ESP32-C6
-        if: matrix.env == 'esp32-c6'
-        run: |
-          sed -i 's/randomSeed(READ_PERI_REG(DR_REG_RNG_BASE));/randomSeed(millis());/' .pio/libdeps/esp32-c6/arduinoWebSockets/src/WebSocketsServer.cpp
-      # ================================
-
       - name: Build ${{ matrix.env }}
         id: build
-        run: |
-          if [ "${{ matrix.env }}" = "esp32-c6" ]; then
-            echo "::notice::Building ESP32-C6 with platformio-c6.ini"
-            pio run -c platformio-c6.ini -e esp32-c6
-          else
-            pio run -e ${{ matrix.env }}
-          fi
+        run: pio run -e ${{ matrix.env }}
         continue-on-error: ${{ matrix.env == 'esp32-c6' }}
       
       - name: Find firmware binary
